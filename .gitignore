@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+data/*.db
+data/raw/*.csv
+.streamlit/
+*.log
+test_langsmith.py
+.vscode/

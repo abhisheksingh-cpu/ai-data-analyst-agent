@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+groq
+pydantic
+redis
+python-dotenv
+tavily-python
+requests
+pandas
+langsmith

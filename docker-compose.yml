@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis
+    ports:
+      - "6379:6379"
+
+  sql_agent:
+    build:
+      context: .
+      dockerfile: services/sql_agent/Dockerfile
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+
+  planner_agent:
+    build:
+      context: .
+      dockerfile: services/planner_agent/Dockerfile
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+
+  research_agent:
+    build:
+      context: .
+      dockerfile: services/research_agent/Dockerfile
+    ports:
+      - "8003:8003"
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+
+  synthesizer_agent:
+    build:
+      context: .
+      dockerfile: services/synthesizer_agent/Dockerfile
+    ports:
+      - "8004:8004"
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+
+  critic_agent:
+    build:
+      context: .
+      dockerfile: services/critic_agent/Dockerfile
+    ports:
+      - "8005:8005"
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
