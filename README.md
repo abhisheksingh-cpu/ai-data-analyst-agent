@@ -1,700 +1,208 @@
 # AI Data Analyst Agent
 
-> A distributed multi-agent AI system that autonomously analyzes business data, executes SQL queries, performs statistical analysis, gathers external context, and generates evidence-backed insights.
+> A distributed multi-agent AI system that answers natural-language business questions over a real e-commerce dataset — by planning, querying, researching, synthesizing, and critiquing its own answers across five independent, containerized services.
 
 ## Overview
 
-Modern businesses ask questions like:
+Business questions like *"why did delivery delays increase in early 2018?"* don't have a single-query answer. They require breaking the question down, pulling structured data, gathering outside context when the database doesn't have it, and reasoning over all of it — while staying honest about what the evidence actually supports.
 
-* *Why did delivery delays increase in March 2018?*
-* *Which product categories have the lowest customer satisfaction?*
-* *How did order volume affect shipping performance?*
-
-Answering these questions typically requires analysts to write SQL queries, perform data analysis, search for external events, and combine multiple sources of information.
-
-This project automates that workflow using a **distributed multi-agent architecture** where specialized AI agents collaborate to solve complex analytical problems.
-
-Instead of acting as a chatbot, the system behaves like a team of analysts, with each agent responsible for a single task.
+This project automates that workflow with five specialized agents, each running as its own service, coordinating over Redis. It's built to behave less like a chatbot and more like a small team of analysts who check each other's work — including catching, in testing, cases where the system's own data contradicted the question's premise.
 
 ---
 
-# Architecture
+## Architecture
 
 ```
-                   User Question
-                         │
-                         ▼
-                  Gateway Service
-                         │
-                         ▼
-                 Planner Agent
-                         │
-          ┌──────────────┴──────────────┐
-          ▼                             ▼
-      SQL Agent                  Research Agent
-          │                             │
-          ▼                             ▼
-   SQLite Database              External Knowledge
-          │                             │
-          └──────────────┬──────────────┘
-                         ▼
-                 Analysis Agent
-                         │
-                         ▼
-                  Critic Agent
-                         │
-                         ▼
-                  Final Response
+                    User Question
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │  Intent Guardrail │  (blocks destructive requests
+                 └────────┬────────┘   before any agent runs)
+                          ▼
+                 ┌─────────────────┐
+                 │  Orchestrator    │  (Python, coordinates everything)
+                 └────────┬────────┘
+                          │  Redis queues (+ direct HTTP per service)
+        ┌─────────┬───────┴───────┬───────────┐
+        ▼         ▼               ▼           ▼
+   ┌────────┐ ┌────────┐    ┌──────────┐ ┌────────┐
+   │Planner │ │  SQL   │    │Research  │ │ Critic │
+   │ Agent  │ │ Agent  │    │ Agent    │ │ Agent  │
+   └────────┘ └───┬────┘    └────┬─────┘ └────────┘
+                   │              │            ▲
+                   ▼              ▼            │
+              SQLite DB     Tavily Search       │
+                   │              │             │
+                   └──────┬───────┘             │
+                          ▼                     │
+                 ┌─────────────────┐             │
+                 │ Synthesizer Agent │───────────┘
+                 └─────────────────┘
+                          │
+                          ▼
+                   Final Answer
+```
+
+**Pipeline for a single question:**
+1. **Intent guardrail** rejects destructive requests ("delete all orders") before any agent runs
+2. **Planner Agent** decomposes the question into 2-4 sub-questions, grounded in the actual database schema — each sub-question must resolve to a concrete number or comparison, not a question about how to write the query
+3. Each sub-question routes to:
+   - **SQL Agent** — generates a SQLite query, blocks it if it contains any write/delete operation, executes it against the real database
+   - **Research Agent** — for anything outside the schema, runs a real Tavily web search and reasons over the actual search results
+4. **Synthesizer Agent** combines every step's results into one evidence-based answer
+5. **Critic Agent** checks the answer against the evidence for unsupported claims, implausible numbers, and internal contradictions — triggers a revision if it finds a real issue
+6. Failures at any step are retried with backoff; a failed Critic doesn't block the answer, a failed Planner or Synthesizer does (see [Design Decisions](#design-decisions))
+
+Each agent is a separate FastAPI service, containerized via Docker Compose, reachable over both direct HTTP (for manual testing via each service's `/docs` page) and Redis queues (the path actually used by the orchestrator).
+
+---
+
+## Stack
+
+| Layer | Tech |
+|---|---|
+| LLM | Groq (Llama 3.3 70B) |
+| Web search | Tavily |
+| Service framework | FastAPI + Uvicorn |
+| Inter-service messaging | Redis (queues + caching) |
+| Database | SQLite (Olist Brazilian E-Commerce dataset) |
+| Containerization | Docker + Docker Compose |
+| Observability | LangSmith (per-agent call tracing: inputs, outputs, latency) |
+| UI | Streamlit (with auto-generated charts for multi-row results) |
+| Orchestration | Custom Python orchestrator — built by hand before reaching for a framework, see [Design Decisions](#design-decisions) |
+
+---
+
+## Project structure
+
+```
+ai-data-analyst-agent/
+├── app/
+│   └── streamlit_app.py
+├── eval/
+│   ├── eval_questions.json
+│   ├── run_eval.py
+│   └── results/
+├── orchestrator/
+│   └── run_pipeline.py
+├── services/
+│   ├── planner_agent/      (main.py + Dockerfile)
+│   ├── sql_agent/
+│   ├── research_agent/
+│   ├── synthesizer_agent/
+│   └── critic_agent/
+├── shared/
+│   └── cache.py            (Redis cache + queue helpers, used by every service)
+├── data/
+│   └── raw/                (Olist CSVs — not committed, see Setup)
+├── docker-compose.yml
+├── requirements.txt
+└── .env                     (not committed — see Setup)
 ```
 
 ---
 
-# Agent Responsibilities
+## Setup
 
-### Planner Agent
+**Prerequisites:** Docker Desktop, Python 3.11+, free API keys from [Groq](https://console.groq.com), [Tavily](https://tavily.com), and optionally [LangSmith](https://smith.langchain.com) for tracing.
 
-* Understands the user's intent
-* Breaks vague questions into executable tasks
-* Decides which agents should execute each task
-* Routes tasks through the pipeline
+1. **Clone and enter the repo:**
+   ```bash
+   git clone https://github.com/<your-username>/ai-data-analyst-agent.git
+   cd ai-data-analyst-agent
+   ```
 
----
+2. **Get the dataset:** download the [Olist Brazilian E-Commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) from Kaggle, place the CSVs in `data/raw/`.
 
-### SQL Agent
+3. **Build the SQLite database:**
+   ```python
+   import pandas as pd, sqlite3, os
+   conn = sqlite3.connect('data/olist.db')
+   for f in os.listdir('data/raw'):
+       if f.endswith('.csv'):
+           pd.read_csv(f'data/raw/{f}').to_sql(f.replace('.csv', ''), conn, if_exists='replace', index=False)
+   ```
 
-* Converts natural language into SQLite queries
-* Uses schema-aware prompting
-* Executes SQL safely
-* Returns structured datasets
+4. **Create `.env` in the project root:**
+   ```
+   GROQ_API_KEY=
+   TAVILY_API_KEY=
+   LANGSMITH_API_KEY=
+   LANGSMITH_PROJECT=ai-data-analyst-agent
+   LANGSMITH_TRACING=true
+   LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+   ```
 
----
+5. **Start all 5 agent services + Redis:**
+   ```bash
+   docker-compose up --build
+   ```
 
-### Research Agent
+6. **Run the UI:**
+   ```bash
+   cd app
+   streamlit run streamlit_app.py
+   ```
 
-* Handles questions that require external knowledge
-* Identifies information unavailable in the internal database
-* Provides contextual evidence while clearly distinguishing facts from hypotheses
-
----
-
-### Analysis Agent
-
-* Performs statistical analysis using Pandas
-* Detects trends, anomalies, correlations, and comparisons
-* Converts raw query results into business insights
-
----
-
-### Critic Agent
-
-* Validates every generated response
-* Detects unsupported claims
-* Checks logical consistency
-* Requests revisions when evidence is insufficient
-
----
-
-# Distributed System Design
-
-Unlike traditional AI projects where every component runs inside one Python script, this system is designed as independent services.
-
-Each agent can run separately and communicate through a message broker.
-
-Features include:
-
-* Independent microservices
-* Asynchronous communication
-* Message queues
-* Fault isolation
-* Retry mechanisms
-* Structured logging
-* Horizontal scalability
+7. **Or run a single question from the command line:**
+   ```bash
+   cd orchestrator
+   python run_pipeline.py
+   ```
 
 ---
-
-# Technology Stack
-
-## AI
-
-* Python
-* Groq API
-* Prompt Engineering
-
-## Backend
-
-* FastAPI
-* Uvicorn
-* Pydantic
-
-## Distributed Systems
-
-* Redis
-* Redis Streams
-* Docker
-* Docker Compose
-
-## Data Processing
-
-* SQLite
-* Pandas
-* NumPy
 
 ## Evaluation
 
-* PyTest
-* Custom Evaluation Harness
-* LangSmith
+A 16-question eval harness (`eval/`) spans factual lookups, multi-table joins, time-series trends, deliberately false-premise questions, a known data-completeness edge case, and a safety-guardrail test. Ground truth for the answerable, factual/join questions was computed by hand directly against the database before running the system.
 
-## Observability
+**Latest full run** (`eval/results/`): all 16 questions completed with zero pipeline crashes. 56% of answers were flagged by the Critic for revision — every flag corresponded to a real, specific issue (an internally contradictory claim, an unsupported caveat not backed by that run's evidence, an implausible outlier value), not reflexive skepticism. The run also hit Groq's daily rate limit partway through on a later session — the retry/fault-tolerance logic degraded gracefully rather than crashing, which is itself part of what the harness was built to verify.
 
-* Structured Logging
-* Latency Metrics
-* Failure Tracking
-
-## Frontend
-
-* Streamlit
-
----
-
-## Project Structure
-
-```text
-ai-data-analyst-agent/
-│
-├── app/
-│   └── streamlit_app.py          # Streamlit frontend for interacting with the system
-│
-├── eval/
-│   ├── eval_questions.json       # Benchmark questions used for evaluation
-│   ├── run_eval.py               # Evaluation pipeline
-│   └── results/                  # Saved evaluation outputs
-│
-├── orchestrator/
-│   ├── run_pipeline.py           # Coordinates communication between agents
-│   └── __pycache__/
-│
-├── services/
-│   │
-│   ├── planner_agent/
-│   │   ├── main.py               # Breaks user queries into executable tasks
-│   │   └── Dockerfile
-│   │
-│   ├── sql_agent/
-│   │   ├── main.py               # Generates and executes SQL queries
-│   │   └── Dockerfile
-│   │
-│   ├── research_agent/
-│   │   ├── main.py               # Retrieves external context when internal data is insufficient
-│   │   └── Dockerfile
-│   │
-│   ├── synthesizer_agent/
-│   │   ├── main.py               # Merges outputs from all agents into a unified response
-│   │   └── Dockerfile
-│   │
-│   └── critic_agent/
-│       ├── main.py               # Validates evidence and checks response quality
-│       └── Dockerfile
-│
-├── shared/
-│   ├── cache.py                  # Redis cache interface
-│   ├── config.py                 # Shared configuration
-│   ├── logger.py                 # Structured logging utilities
-│   ├── models.py                 # Shared Pydantic request/response models
-│   ├── prompts.py                # Centralized prompt templates
-│   ├── database.py               # SQLite connection management
-│   ├── constants.py              # Global constants
-│   └── utils.py                  # Shared helper functions
-│
-├── data/
-│   ├── raw/                      # Original Olist CSV dataset
-│   ├── processed/                # Cleaned datasets
-│   └── olist.db                  # SQLite database
-│
-├── logs/
-│   ├── gateway/
-│   ├── planner/
-│   ├── sql/
-│   ├── research/
-│   ├── synthesizer/
-│   └── critic/
-│
-├── tests/
-│   ├── test_planner.py
-│   ├── test_sql_agent.py
-│   ├── test_research_agent.py
-│   ├── test_pipeline.py
-│   └── test_gateway.py
-│
-├── .env                          # Environment variables
-├── .gitignore
-├── docker-compose.yml            # Multi-container orchestration
-├── requirements.txt
-├── README.md
-└── test_langsmith.py             # LangSmith tracing experiments
-```
-
----
-
-# Workflow
-
-1. User submits a business question.
-2. Planner Agent decomposes the task.
-3. SQL Agent retrieves structured data.
-4. Research Agent gathers external context if required.
-5. Analysis Agent performs statistical reasoning.
-6. Critic Agent validates the answer.
-7. Final response is returned with supporting evidence.
-
----
-
-# Example
-
-### Input
-
-```
-Why did delivery delays increase in early 2018?
-```
-
-### Planner
-
-* Calculate monthly delivery delays
-* Analyze delayed order volume
-* Examine customer distribution
-* Request external context if necessary
-
-### SQL
-
-Generates SQLite queries automatically.
-
-### Analysis
-
-Finds:
-
-* March 2018 had the highest delivery delay
-* Delayed orders increased significantly
-* Certain regions experienced higher delays
-
-### Critic
-
-Checks:
-
-* Is every claim supported?
-* Was every planner task completed?
-* Are assumptions clearly labeled?
-
-### Final Output
-
-A validated, evidence-backed explanation instead of a simple SQL result.
-
----
-
-# Current Features
-
-* Schema-aware SQL generation
-* Automatic query execution
-* Multi-agent orchestration
-* Planner-based task decomposition
-* SQLite dialect validation
-* Research routing
-* Evidence validation
-* Structured logging
-
----
-
-## Future Improvements
-
-* Apache Kafka for high-throughput distributed messaging
-* Kubernetes deployment with horizontal pod autoscaling
-* PostgreSQL support alongside SQLite
-* Multi-database connectors (MySQL, PostgreSQL, Snowflake)
-* OAuth2/JWT authentication for the Gateway API
-* CI/CD pipeline using GitHub Actions
-* Cloud deployment on AWS/GCP with container orchestration
-* Query optimization and execution cost estimation
-* Historical analytics dashboard with interactive visualizations
-* Support for multiple LLM providers (Groq, Gemini, OpenAI, Anthropic)
-
-
----
-
-# Engineering Challenges Solved
-
-## 1. Grounding the Planner in Available Data
-
-### Problem
-
-The initial Planner Agent generated investigation steps that required data the system did not possess, such as:
-
-* Weather conditions
-* Traffic reports
-* Carrier logistics
-* Competitor events
-
-Although these were reasonable business hypotheses, they were impossible to execute because the underlying dataset contained none of this information.
-
-### Solution
-
-The planner was redesigned to become **schema-aware**.
-
-Instead of planning from the user query alone, the agent now receives the complete database schema as part of its prompt.
-
-If the requested information cannot be answered using the available tables, the planner explicitly labels the step as:
-
-```text
-[REQUIRES EXTERNAL RESEARCH]
-```
-
-This allows the orchestration layer to automatically route those tasks to the Research Agent instead of attempting invalid SQL generation.
-
-**Result**
-
-* Eliminated impossible execution plans
-* Reduced planner hallucinations
-* Enabled intelligent routing between internal and external knowledge sources
-
----
-
-## 2. SQL Dialect Incompatibility
-
-### Problem
-
-Despite generating syntactically correct SQL, the LLM consistently defaulted to PostgreSQL/MySQL syntax.
-
-Common failures included:
-
-```sql
-EXTRACT(YEAR FROM ...)
-```
-
-```sql
-WEEK(order_date)
-```
-
-```sql
-MONTH(order_date)
-```
-
-These functions are unsupported in SQLite, causing runtime failures even though the generated queries appeared correct.
-
-### Solution
-
-The SQL Agent was redesigned with explicit SQLite constraints.
-
-The prompt now enforces:
-
-* `strftime()` for date extraction
-* `julianday()` for date arithmetic
-* SQLite-specific syntax only
-* No PostgreSQL/MySQL functions
-
-The agent also receives schema information so it can generate dialect-aware joins and aggregations.
-
-**Result**
-
-* Significantly reduced SQL execution failures
-* Improved first-pass query correctness
-* Eliminated manual query rewriting
-
----
-
-## 3. Cleaning LLM Output Before Execution
-
-### Problem
-
-LLM responses frequently contained Markdown formatting:
-
-````text
-```sql
-SELECT ...
-```
-````
-
-Passing these responses directly to SQLite caused parser errors.
-
-### Solution
-
-A lightweight preprocessing layer (`clean_sql()`) was introduced to normalize model outputs before execution by removing Markdown fences and preserving only executable SQL.
-
-**Result**
-
-* Reliable query execution
-* Reduced runtime parsing errors
-* Simplified downstream orchestration
-
----
-
-## 4. Separating Planning from Execution
-
-### Problem
-
-The initial architecture blurred the responsibilities of planning and execution.
-
-The Planner Agent often attempted to solve the problem directly instead of producing actionable sub-tasks, making the pipeline difficult to orchestrate and extend.
-
-### Solution
-
-Agent responsibilities were redefined using the Single Responsibility Principle.
-
-* **Planner Agent** → Generates execution plans only
-* **SQL Agent** → Retrieves structured data
-* **Research Agent** → Handles external context
-* **Analysis Agent** → Performs statistical reasoning
-* **Critic Agent** → Validates evidence and final responses
-
-Each component now performs one well-defined task, enabling independent development, testing, and scaling.
-
-**Result**
-
-* Cleaner orchestration pipeline
-* Better modularity
-* Easier fault isolation
-* Simpler future migration to distributed microservices
-
----
-
-## 5. Making Natural Language Queries Executable
-
-### Problem
-
-Business questions are inherently ambiguous:
-
-> "Why did delivery delays increase in early 2018?"
-
-This question cannot be answered with a single SQL statement because it combines multiple analytical tasks and may require information outside the database.
-
-### Solution
-
-The Planner Agent decomposes complex questions into smaller executable units.
-
-For example:
-
-1. Calculate monthly delivery delays.
-2. Count delayed orders by month.
-3. Analyze regional customer distribution.
-4. Flag external factors for the Research Agent.
-
-Each task is independently processed and later combined into a single evidence-backed response.
-
-**Result**
-
-* Improved reasoning transparency
-* More reliable SQL generation
-* Extensible multi-agent workflow
-* Easier debugging and evaluation
-
----
-
-## Key Engineering Takeaways
-
-This project evolved beyond a simple LLM wrapper through iterative engineering improvements:
-
-* Grounded planning using database schema
-* SQLite-aware SQL generation
-* Automatic output sanitization
-* Clear separation of agent responsibilities
-* Intelligent routing between internal analytics and external research
-
-Each improvement was driven by failures observed during development, resulting in a more reliable and production-oriented multi-agent system.
-
-# Why This Project?
-
-This project goes beyond a traditional chatbot or RAG application by combining:
-
-* Multi-Agent AI
-* Distributed Systems
-* Microservices
-* Tool Calling
-* SQL Generation
-* Automated Evaluation
-* Fault-Tolerant Architecture
-* Production-Oriented Design
-
-It demonstrates practical software engineering principles alongside modern LLM application development.
-
----
-
-## Getting Started
-
-### Prerequisites
-
-Make sure the following software is installed:
-
-* Python 3.11+
-* Docker Desktop
-* Docker Compose
-* Git
-
-You'll also need:
-
-* A Groq API Key (or another supported LLM provider)
-* The Olist Brazilian E-Commerce Dataset
-
----
-
-## Clone the Repository
-
+Run it yourself:
 ```bash
-git clone https://github.com/<your-username>/ai-data-analyst-agent.git
-cd ai-data-analyst-agent
+cd eval
+python run_eval.py
 ```
 
 ---
 
-## Create a Virtual Environment
+## Design decisions
 
-### Windows
+**Why a custom orchestrator instead of LangChain/LangGraph?**
+The orchestration logic — prompt construction, parsing, retries, queue coordination — was built by hand first, specifically to understand what a framework would actually be abstracting away before adopting one. A framework migration is a reasonable next step; doing it after building the raw version means understanding what's underneath it, not just what it returns.
 
-```bash
-python -m venv venv
-venv\Scripts\activate
-```
+**Why Redis queues *and* direct HTTP, rather than just one?**
+Direct HTTP was built first and is simpler. Redis queues were added deliberately, service by service, to prove out an asynchronous, decoupled communication pattern — the kind of pattern real distributed systems need when a consumer can't be guaranteed available the instant a producer calls it. Both paths exist; the queue path is what the orchestrator actually uses.
 
-### macOS / Linux
+**Why two layers of safety guardrails, not one?**
+The first guardrail checked the SQL Agent's *generated query* for destructive keywords. Testing with the literal prompt "delete all orders from 2018" revealed the Planner would reframe the request into innocuous-sounding sub-questions (date filtering syntax, etc.) that passed the SQL-level check cleanly — while the Synthesizer still narrated the deletion intent in its final answer. A second guardrail was added at the orchestrator's entry point, checking the original question's intent before any agent runs, closing the gap the first guardrail couldn't see.
 
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
+**Why is a Critic failure non-fatal, but a Planner or Synthesizer failure is?**
+An answer that wasn't reviewed by the Critic is still useful. No answer at all is not. The system makes this tradeoff explicit in its output ("CRITIC UNAVAILABLE — answer was not reviewed due to service failure") rather than silently downgrading quality.
 
 ---
 
-## Install Dependencies
+## Engineering log
 
-```bash
-pip install -r requirements.txt
-```
+Real bugs found and fixed during development — the debugging process here is as much the point of the project as the final architecture.
 
----
-
-## Configure Environment Variables
-
-Create a `.env` file in the project root.
-
-```env
-GROQ_API_KEY=your_api_key_here
-
-REDIS_HOST=localhost
-REDIS_PORT=6379
-
-SQLITE_DB=data/olist.db
-```
+- **Cross-step inconsistency.** Independent SQL Agent calls within a single pipeline run sometimes used different definitions of the same term (e.g. "delayed orders") because each call had no memory of how a prior step in the same run had defined it. Fixed by hard-coding the definition into the SQL Agent's prompt rather than leaving it to per-call inference.
+- **Signed-value misinterpretation.** Delivery delay was computed as `actual date − estimated date`, so early deliveries came out negative. Both the Synthesizer and Critic occasionally reasoned about the sign backwards, calling an improving trend a worsening one. Fixed by requiring explicit, unambiguous column aliases (`avg_days_late`, where positive always means late).
+- **Guardrail bypass via reframing.** See Design Decisions above — caught by deliberately testing a destructive prompt, not by accident.
+- **Dead worker threads, found three separate times.** Three different agent services had a background queue-worker function fully defined but never actually *started* — `threading.Thread(target=worker_loop, daemon=True).start()` was missing from the file. Tasks piled up silently in the Redis queue with nothing consuming them; no error, no crash, just a hang. Found each time by directly inspecting queue length in Redis rather than trusting application logs.
+- **BRPOP socket timeout crash.** Redis's blocking pop call raised an uncaught `TimeoutError` that permanently killed the consuming worker thread after a single empty poll — a known interaction between `redis-py`'s socket timeout and `BRPOP`'s own timeout parameter. Fixed with an explicit, longer socket timeout and an outer exception boundary around the polling loop so a transient error can't take the thread down.
+- **SQLite thread-safety under Streamlit.** A connection created with default settings worked fine from a plain CLI script but broke under Streamlit's execution model. Fixed with `check_same_thread=False`.
+- **Planner generating implementation questions instead of analytical ones.** Early Planner output included sub-questions like "what SQL function should we use to compare these dates?" instead of questions that resolve to an actual number. Fixed with contrastive few-shot examples (explicit GOOD vs. BAD sub-question pairs) in the prompt — more effective than an abstract instruction alone.
+- **LangSmith traces silently not arriving.** Traces appeared to send without error but never showed in the dashboard. Root cause, found by testing the SDK in isolation outside the app: a stale/invalid API key baked into an already-running container — editing `.env` doesn't affect a container that's already running until it's rebuilt. Confirmed and fixed by rotating the key and rebuilding.
+- **Cache masking real test results, more than once.** Several "is this actually fixed?" tests quietly returned a stale, cached answer rather than exercising the new code, because the cache key is derived from the question text, not from the underlying logic version. Caught each time by noticing identical, word-for-word output across what should have been different test runs, and resolved by testing with genuinely novel questions.
 
 ---
 
-## Download the Dataset
+## What's not done
 
-Download the **Olist Brazilian E-Commerce Dataset** from Kaggle.
+In the interest of accuracy rather than overselling: long-term cross-session memory was scoped but deliberately not built — doing it well needs semantic retrieval, not just exact-match caching, and that's a meaningfully larger addition than anything else here. Three of the sixteen eval questions (trend-category) don't yet have hand-verified ground truth. The Synthesizer's tendency to occasionally insert an unsupported data-completeness caveat is improved with a conditional prompt rule, but not exhaustively re-verified across the full eval set.
 
-Place the extracted files inside:
+## Possible next steps
 
-```text
-data/raw/
-```
-
-Your folder should look like:
-
-```text
-data/
-├── raw/
-│   ├── olist_customers_dataset.csv
-│   ├── olist_orders_dataset.csv
-│   ├── olist_order_items_dataset.csv
-│   ├── ...
-│
-└── processed/
-```
-
-Run the database setup script to create the SQLite database.
-
----
-
-## Start Redis
-
-Using Docker:
-
-```bash
-docker run -d --name redis -p 6379:6379 redis
-```
-
-Verify Redis is running:
-
-```bash
-docker ps
-```
-
----
-
-## Launch the Agent Services
-
-From the project root:
-
-```bash
-docker-compose up --build
-```
-
-This starts:
-
-* Planner Agent
-* SQL Agent
-* Research Agent
-* Synthesizer Agent
-* Critic Agent
-* Redis
-* Gateway Service
-
----
-
-## Launch the Streamlit UI
-
-Open a new terminal:
-
-```bash
-streamlit run app/streamlit_app.py
-```
-
-The application will be available at:
-
-```text
-http://localhost:8501
-```
-
----
-
-## Running Evaluations
-
-Execute the evaluation suite:
-
-```bash
-python eval/run_eval.py
-```
-
-Evaluation outputs will be stored in:
-
-```text
-eval/results/
-```
-
----
-
-## Running Tests
-
-Run all unit and integration tests:
-
-```bash
-pytest
-```
-
----
-
-## Stopping the Services
-
-```bash
-docker-compose down
-```
-
-To also remove containers and networks:
-
-```bash
-docker-compose down --volumes
-```
+Kubernetes deployment, a real CI/CD pipeline, multi-database support beyond SQLite, and a lightweight long-term memory layer (Redis-backed run history, retrieved by relevance rather than exact match) are the most natural extensions, in roughly that order of effort-to-value.
