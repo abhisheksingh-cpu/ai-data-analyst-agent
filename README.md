@@ -17,11 +17,11 @@ This project automates that workflow with five specialized agents, each running 
                           │
                           ▼
                  ┌─────────────────┐
-                 │  Intent Guardrail │  (blocks destructive requests
+                 │ Intent Guardrail│  (blocks destructive requests
                  └────────┬────────┘   before any agent runs)
                           ▼
                  ┌─────────────────┐
-                 │  Orchestrator    │  (Python, coordinates everything)
+                 │  Orchestrator   │  (Python, coordinates everything)
                  └────────┬────────┘
                           │  Redis queues (+ direct HTTP per service)
         ┌─────────┬───────┴───────┬───────────┐
@@ -30,14 +30,14 @@ This project automates that workflow with five specialized agents, each running 
    │Planner │ │  SQL   │    │Research  │ │ Critic │
    │ Agent  │ │ Agent  │    │ Agent    │ │ Agent  │
    └────────┘ └───┬────┘    └────┬─────┘ └────────┘
-                   │              │            ▲
-                   ▼              ▼            │
-              SQLite DB     Tavily Search       │
-                   │              │             │
-                   └──────┬───────┘             │
-                          ▼                     │
-                 ┌─────────────────┐             │
-                 │ Synthesizer Agent │───────────┘
+                   │              │          ▲
+                   ▼              ▼          │
+              SQLite DB     Tavily Search    │
+                   │              │          │
+                   └──────┬───────┘          │
+                          ▼                  │
+                 ┌─────────────────┐         │
+                 │Synthesizer Agent│─────────┘
                  └─────────────────┘
                           │
                           ▼
