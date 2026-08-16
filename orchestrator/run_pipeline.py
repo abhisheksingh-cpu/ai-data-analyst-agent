@@ -4,18 +4,19 @@ import sqlite3
 import pandas as pd
 import uuid
 import sys
+import os
 
-sys.path.append("../shared")
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "shared"))
 from cache import push_task, pop_task, push_result, pop_result
+
 PLANNER_URL = "http://127.0.0.1:8002/run"
 SQL_AGENT_URL = "http://127.0.0.1:8001/run"
 RESEARCH_URL = "http://127.0.0.1:8003/run"
 SYNTHESIZER_URL = "http://127.0.0.1:8004/run"
 CRITIC_URL = "http://127.0.0.1:8005/run"
 
-
-conn = sqlite3.connect(r"C:\Users\abhis\Python Project Folder\data\olist.db", check_same_thread=False)
-
+DB_PATH = os.environ.get("OLIST_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "data", "olist.db"))
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 
 def parse_plan(plan_text):
     steps = re.split(r'\n?\d+\.\s+', plan_text)
