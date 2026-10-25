@@ -49,9 +49,9 @@ Respond with either:
 "APPROVED" if the answer is well-supported and internally consistent, or
 "REVISE: <specific issue found>" if there's a problem.
 """
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        max_tokens=300,
+    response = client.chat.completions.create(reasoning_effort="low", 
+        model="openai/gpt-oss-120b",
+        max_tokens=4096,
         messages=[{"role": "user", "content": prompt}]
     )
     critique = response.choices[0].message.content.strip()

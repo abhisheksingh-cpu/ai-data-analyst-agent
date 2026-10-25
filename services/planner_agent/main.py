@@ -72,9 +72,9 @@ BAD examples (do NOT generate these for trend questions):
 - "How many more orders were placed in February than January?" (just a difference 
   between two points, not the full trend)
 """
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        max_tokens=300,
+    response = client.chat.completions.create(reasoning_effort="low", 
+        model="openai/gpt-oss-120b",
+        max_tokens=4096,
         messages=[{"role": "user", "content": prompt}]
     )
     plan = response.choices[0].message.content.strip()

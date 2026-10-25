@@ -55,9 +55,9 @@ Based on these search results, provide a brief, evidence-based explanation (2-4
 sentences). If the search results don't actually address the question, say so 
 clearly rather than guessing.
 """
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        max_tokens=300,
+    response = client.chat.completions.create(reasoning_effort="low", 
+        model="openai/gpt-oss-120b",
+        max_tokens=4096,
         messages=[{"role": "user", "content": prompt}]
     )
     answer = response.choices[0].message.content.strip()

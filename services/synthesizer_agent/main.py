@@ -44,9 +44,9 @@ Write a clear, evidence-based answer (4-6 sentences) to the original question.
 If the data contradicts the question's premise, say so explicitly rather than 
 forcing an answer that fits the assumption.
 """
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        max_tokens=400,
+    response = client.chat.completions.create(reasoning_effort="low", 
+        model="openai/gpt-oss-120b",
+        max_tokens=4096,
         messages=[{"role": "user", "content": prompt}]
     )
     answer = response.choices[0].message.content.strip()

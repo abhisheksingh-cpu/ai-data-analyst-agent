@@ -63,9 +63,9 @@ Schema:
 
 Question: {req.question}
 """
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        max_tokens=300,
+    response = client.chat.completions.create(reasoning_effort="low", 
+        model="openai/gpt-oss-120b",
+        max_tokens=4096,
         messages=[{"role": "user", "content": prompt}]
     )
     query = clean_sql(response.choices[0].message.content.strip())
